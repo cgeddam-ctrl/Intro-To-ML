@@ -25,7 +25,6 @@ transform_test = transforms.Compose([
                          (0.2023, 0.1994, 0.2010))
 ])
 
-
 # DATALOADERS 
 def get_loaders(batch_size=256):
     trainset = torchvision.datasets.CIFAR10(
