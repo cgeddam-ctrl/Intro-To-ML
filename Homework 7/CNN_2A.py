@@ -151,7 +151,7 @@ def test_epoch(model, loader):
 
 # MAIN: RUN 2(a) 
 if __name__ == "__main__":
-    print("\n🔥 Running 2(a): ResNet-10 (Lecture Version, Skip Connections + BatchNorm)")
+    print("\n Running 2(a): ResNet-10 (Lecture Version, Skip Connections + BatchNorm)")
 
     trainloader, testloader = get_loaders(batch_size=256)
     model = ResNet10().to(device)
@@ -176,3 +176,4 @@ if __name__ == "__main__":
     print(f" Training Time: {total_time:.2f} seconds")
     print(f" Final Training Loss: {train_loss:.4f}")
     print(f" Final Test Accuracy: {test_acc:.2f}%")
+
