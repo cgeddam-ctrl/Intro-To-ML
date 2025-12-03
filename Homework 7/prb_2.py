@@ -7,21 +7,13 @@ from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 import time
 
-
-# =========================================================
-# GPU OPTIMIZATIONS
-# =========================================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-torch.backends.cudnn.benchmark = True   # Auto-tune best conv kernels
+torch.backends.cudnn.benchmark = True
 print("Using device:", device)
 
-
-# =========================================================
-# DATA TRANSFORMS
-# =========================================================
 transform_train = transforms.Compose([
     transforms.RandomCrop(32, padding=4),
-    transforms.RandomHorizontalFlip(),
+    transforms.Random.RandomHorizontalFlip(),
     transforms.ToTensor(),
     transforms.Normalize((0.4914, 0.4822, 0.4465),
                          (0.2023, 0.1994, 0.2010))
@@ -34,119 +26,153 @@ transform_test = transforms.Compose([
 ])
 
 
-# =========================================================
-# SIMPLE FAST CNN MODEL (Modify to your needs)
-# =========================================================
-class FastCNN(nn.Module):
-    def __init__(self):
-        super(FastCNN, self).__init__()
-
-        self.conv1 = nn.Conv2d(3, 16, 3, padding=1)
-        self.conv2 = nn.Conv2d(16, 32, 3, padding=1)
-        self.conv3 = nn.Conv2d(32, 64, 3, padding=1)
-
-        self.pool = nn.MaxPool2d(2, 2)
-
-        self.fc1 = nn.Linear(64 * 4 * 4, 128)
-        self.fc2 = nn.Linear(128, 10)
-
-    def forward(self, x):
-        x = self.pool(torch.relu(self.conv1(x)))
-        x = self.pool(torch.relu(self.conv2(x)))
-        x = self.pool(torch.relu(self.conv3(x)))
-        x = x.view(-1, 64 * 4 * 4)
-        x = torch.relu(self.fc1(x))
-        x = self.fc2(x)
-        return x
-
-
-# =========================================================
-# TRAINING FUNCTION (with AMP & tqdm)
-# =========================================================
-def train(model, loader, optimizer, criterion, scaler):
-    model.train()
-    running_loss = 0.0
-
-    for inputs, targets in tqdm(loader, desc="Training"):
-        inputs, targets = inputs.to(device), targets.to(device)
-
-        optimizer.zero_grad()
-
-        # Mixed precision
-        with autocast():
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-        running_loss += loss.item() * inputs.size(0)
-
-    return running_loss / len(loader.dataset)
-
-
-# =========================================================
-# TEST FUNCTION
-# =========================================================
-def test(model, loader):
-    model.eval()
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-        for inputs, targets in loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = model(inputs)
-            _, predicted = torch.max(outputs, 1)
-
-            total += targets.size(0)
-            correct += predicted.eq(targets).sum().item()
-
-    return 100 * correct / total
-
-
-# =========================================================
-# MAIN
-# =========================================================
-if __name__ == "__main__":
-
-    # FAST DATALOADERS FOR RTX 4070
+# DATALOADERS 
+def get_loaders(batch_size=256): # Training batch size set to 256 NVIDIA 4070
     trainset = torchvision.datasets.CIFAR10(
         root="./data", train=True, download=True, transform=transform_train
     )
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=256, shuffle=True,
-        num_workers=0, pin_memory=True
+        trainset, batch_size=batch_size, shuffle=True, num_workers=0
     )
 
     testset = torchvision.datasets.CIFAR10(
         root="./data", train=False, download=True, transform=transform_test
     )
     testloader = torch.utils.data.DataLoader(
-        testset, batch_size=512, shuffle=False,
-        num_workers=0, pin_memory=True
+        testset, batch_size=1000, shuffle=False, num_workers=0
     )
+    return trainloader, testloader
 
-    # Build model
-    model = FastCNN().to(device)
+# BASIC RESIDUAL BLOCK 
+class BasicBlock(nn.Module):
+    expansion = 1
 
-    # Loss + Optimizer
+    def __init__(self, in_planes, planes, stride=1):
+        super(BasicBlock, self).__init__()
+
+        self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=3,
+                               stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(planes)
+
+        self.conv2 = nn.Conv2d(planes, planes, kernel_size=3,
+                               stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(planes)
+
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_planes != planes:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_planes, planes, kernel_size=1,
+                          stride=stride, bias=False),
+                nn.BatchNorm2d(planes)
+            )
+
+    def forward(self, x):
+        out = torch.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += self.shortcut(x)
+        return torch.relu(out)
+
+
+# RESNET-10 (Lecture: 4 stages - layers)
+class ResNet10(nn.Module):
+    def __init__(self, num_classes=10):
+        super(ResNet10, self).__init__()
+        self.in_planes = 16
+
+        self.conv1 = nn.Conv2d(3, 16, kernel_size=3,
+                               stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(16)
+
+        self.layer1 = self._make_layer(16, stride=1)
+        self.layer2 = self._make_layer(32, stride=2)
+        self.layer3 = self._make_layer(64, stride=2)
+        self.layer4 = self._make_layer(128, stride=2)
+
+        self.linear = nn.Linear(128, num_classes)
+
+    def _make_layer(self, planes, stride):
+        block = BasicBlock(self.in_planes, planes, stride)
+        self.in_planes = planes
+        return block
+
+    def forward(self, x):
+        out = torch.relu(self.bn1(self.conv1(x)))
+
+        out = self.layer1(out)
+        out = self.layer2(out)
+        out = self.layer3(out)
+        out = self.layer4(out)
+
+        out = torch.mean(out, dim=[2, 3])  # Global average pooling
+        out = self.linear(out)
+        return out
+
+
+# TRAIN & TEST 
+def train_epoch(model, loader, optimizer, criterion, scaler):
+    model.train()
+    total_loss = 0
+
+    for images, labels in tqdm(loader, desc="Training", leave=False):
+        images, labels = images.to(device), labels.to(device)
+
+        optimizer.zero_grad()
+
+        with autocast():
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
+        total_loss += loss.item() * images.size(0)
+
+    return total_loss / len(loader.dataset)
+
+
+def test_epoch(model, loader):
+    model.eval()
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for images, labels in loader:
+            images, labels = images.to(device), labels.to(device)
+
+            outputs = model(images)
+            _, predicted = torch.max(outputs, 1)
+
+            total += labels.size(0)
+            correct += predicted.eq(labels).sum().item()
+
+    return 100.0 * correct / total
+
+
+# MAIN: RUN 2(a) 
+if __name__ == "__main__":
+    print("\n🔥 Running 2(a): ResNet-10 (Lecture Version, Skip Connections + BatchNorm)")
+
+    trainloader, testloader = get_loaders(batch_size=256)
+    model = ResNet10().to(device)
+
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=0.001)
+    optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 
-    # Automatic Mixed Precision
     scaler = GradScaler()
+    num_epochs = 200
 
-    num_epochs = 200  # With 4070, 50 epochs takes ~3 minutes
-    start_time = time.time()
+    start = time.time()
 
     for epoch in range(num_epochs):
-        print(f"\nEpoch {epoch+1}/{num_epochs}")
+        print(f"\nEpoch [{epoch+1}/{num_epochs}]")
+        train_loss = train_epoch(model, trainloader, optimizer, criterion, scaler)
+        test_acc = test_epoch(model, testloader)
+        print(f"Loss: {train_loss:.4f} | Test Accuracy: {test_acc:.2f}%")
 
-        train_loss = train(model, trainloader, optimizer, criterion, scaler)
-        acc = test(model, testloader)
+    total_time = time.time() - start
 
-        print(f"Loss: {train_loss:.4f} | Test Acc: {acc:.2f}%")
-
-    print(f"\nTotal Training Time: {time.time() - start_time:.2f} seconds")
+    print("\n========== FINAL RESULTS: 2(a) ==========")
+    print(f" Training Time: {total_time:.2f} seconds")
+    print(f" Final Training Loss: {train_loss:.4f}")
+    print(f" Final Test Accuracy: {test_acc:.2f}%")
